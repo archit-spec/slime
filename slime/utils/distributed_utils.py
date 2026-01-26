@@ -146,9 +146,11 @@ def distributed_masked_whiten(
         global_var = global_var * bessel_correction
 
     # Whiten local data using global stats
-    whitened_values = (values - global_mean) * torch.rsqrt(global_var + epsilon)
-
-    if not shift_mean:
-        whitened_values += global_mean
+    if shift_mean:
+        # Standard whitening: zero mean, unit variance
+        whitened_values = (values - global_mean) * torch.rsqrt(global_var + epsilon)
+    else:
+        # Zero-centered: just scale by 1/std, preserve original mean structure
+        whitened_values = values * torch.rsqrt(global_var + epsilon)
 
     return whitened_values

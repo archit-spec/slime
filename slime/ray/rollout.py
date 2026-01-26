@@ -312,18 +312,40 @@ class RolloutManager:
             # group norm
             rewards = torch.tensor(raw_rewards, dtype=torch.float)
             if rewards.shape[-1] == self.args.n_samples_per_prompt * self.args.rollout_batch_size:
+                # Equal samples per group - use reshape for efficient computation
                 rewards = rewards.reshape(-1, self.args.n_samples_per_prompt)
+                mean = rewards.mean(dim=-1, keepdim=True)
+                rewards = rewards - mean
+
+                if self.args.advantage_estimator in ["grpo", "gspo"] and self.args.grpo_std_normalization:
+                    std = rewards.std(dim=-1, keepdim=True)
+                    rewards = rewards / (std + 1e-6)
+
+                return raw_rewards, rewards.flatten().tolist()
             else:
-                # when samples count are not equal in each group
-                rewards = rewards.view(-1, rewards.shape[-1])
-            mean = rewards.mean(dim=-1, keepdim=True)
-            rewards = rewards - mean
+                # Unequal samples per group - use group_index for proper per-group normalization
+                group_ids = torch.tensor([sample.group_index for sample in samples], dtype=torch.long)
+                rewards_flat = rewards.flatten()
 
-            if self.args.advantage_estimator in ["grpo", "gspo"] and self.args.grpo_std_normalization:
-                std = rewards.std(dim=-1, keepdim=True)
-                rewards = rewards / (std + 1e-6)
+                # Compute per-group means using scatter
+                num_groups = group_ids.max().item() + 1
+                group_counts = torch.zeros(num_groups, dtype=torch.float)
+                group_sums = torch.zeros(num_groups, dtype=torch.float)
 
-            return raw_rewards, rewards.flatten().tolist()
+                group_counts.scatter_add_(0, group_ids, torch.ones_like(rewards_flat))
+                group_sums.scatter_add_(0, group_ids, rewards_flat)
+
+                group_means = group_sums / group_counts
+                rewards_normalized = rewards_flat - group_means[group_ids]
+
+                if self.args.advantage_estimator in ["grpo", "gspo"] and self.args.grpo_std_normalization:
+                    # Compute per-group stds
+                    group_sq_sums = torch.zeros(num_groups, dtype=torch.float)
+                    group_sq_sums.scatter_add_(0, group_ids, rewards_normalized ** 2)
+                    group_stds = (group_sq_sums / group_counts).sqrt()
+                    rewards_normalized = rewards_normalized / (group_stds[group_ids] + 1e-6)
+
+                return raw_rewards, rewards_normalized.tolist()
 
         return raw_rewards, raw_rewards
 
